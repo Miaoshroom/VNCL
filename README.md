@@ -22,7 +22,7 @@ VNCL 是一个基于 [Hello Minecraft! Launcher (HMCL)](https://github.com/HMCL-
 
 ## 运行要求
 
-- Windows 10/11（其他平台的构建未测试）
+- Windows 10/11 或 macOS（Apple Silicon）
 - Java 17 或更高版本（推荐 21）
   - 若系统未安装，发行版自带的启动器会尝试查找/使用已配置的 Java 运行时
 
@@ -37,6 +37,8 @@ $env:JAVA_HOME = "C:\Program Files\Java\jdk-21"
 
 - `VNCL-<version>.exe` —— 单文件启动器（Windows，双击运行）
 - `VNCL-<version>.jar` —— 需要自行用 `java -jar` 启动
+
+在搭载 Apple Silicon 的 Mac 上，运行 `bash scripts/package-macos.sh path/to/VNCL.jar` 可将构建好的 JAR 打包为 `dist/macos-arm64/VNCL.app`。
 
 > 构建需要访问 Maven Central；若 Gradle 发行版下载缓慢，可参考 `gradle/wrapper/gradle-wrapper.properties`
 > 中使用的镜像配置（本项目默认指向腾讯云镜像，校验和不变）。
