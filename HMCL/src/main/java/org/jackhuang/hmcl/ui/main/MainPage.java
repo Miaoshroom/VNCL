@@ -103,16 +103,21 @@ public final class MainPage extends StackPane implements DecoratorPage {
         titleNode.setPadding(new Insets(0, 0, 0, 2));
         titleNode.setAlignment(Pos.CENTER_LEFT);
 
-        ImageView titleIcon = new ImageView(FXUtils.newBuiltinImage("/assets/img/icon-title.png"));
+        if (OperatingSystem.CURRENT_OS != OperatingSystem.MACOS) {
+            ImageView titleIcon = new ImageView(FXUtils.newBuiltinImage("/assets/img/icon-title.png"));
+            if (I18n.isUpsideDown()) {
+                titleIcon.setRotate(180);
+            }
+            titleNode.getChildren().add(titleIcon);
+        }
         Label titleLabel = new Label();
         titleLabel.textProperty().bind(Controllers.launcherTitleProperty());
         if (I18n.isUpsideDown()) {
-            titleIcon.setRotate(180);
             titleLabel.setRotate(180);
         }
         titleLabel.getStyleClass().add("jfx-decorator-title");
         titleLabel.textFillProperty().bind(Themes.titleFillProperty());
-        titleNode.getChildren().setAll(titleIcon, titleLabel);
+        titleNode.getChildren().add(titleLabel);
 
         state.setValue(new State(null, titleNode, false, false, true));
 

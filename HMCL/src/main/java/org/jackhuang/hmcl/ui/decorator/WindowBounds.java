@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH AdditionRef-HMCL
 package org.jackhuang.hmcl.ui.decorator;
 
+import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.beans.InvalidationListener;
 import javafx.beans.property.ReadOnlyDoubleProperty;
@@ -16,7 +17,9 @@ import javafx.scene.layout.Region;
 import javafx.stage.Stage;
 import javafx.stage.StageStyle;
 import javafx.stage.WindowEvent;
+import javafx.util.Duration;
 import org.jetbrains.annotations.NotNullByDefault;
+import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.Unmodifiable;
 
 import java.util.Objects;
@@ -26,12 +29,16 @@ import java.util.function.Consumer;
 ///
 /// All access must occur on the JavaFX application thread. The scene and root must remain attached to the stage
 /// until [#close()] is called. Normal bounds are sampled after layout, and once more before hiding or detaching.
+/// For AppKit decoration, visible bounds are recorded after geometry changes settle.
 /// Maximized bounds under [WindowState]'s policy, full-screen bounds, and iconified bounds are not reported
 /// as normal bounds. Transparent macOS windows retain normal bounds despite native zoom notifications.
 /// Minimum sizes are configured separately after showing or a display-scale or resizability change;
 /// ordinary geometry tracking does not write window constraints.
 @NotNullByDefault
 final class WindowBounds implements AutoCloseable {
+    /// The quiet interval used to distinguish a settled AppKit frame from an in-progress zoom.
+    private static final Duration APPKIT_BOUNDS_SETTLE_DELAY = Duration.millis(150);
+
     /// The stage whose outer geometry is managed.
     private final Stage stage;
 
@@ -52,6 +59,9 @@ final class WindowBounds implements AutoCloseable {
 
     /// Receives normal content bounds in JavaFX screen coordinates.
     private final Consumer<Rectangle2D> saveBounds;
+
+    /// Waits for AppKit zoom events to settle, or `null` when normal bounds can be saved every pulse.
+    private final @Nullable PauseTransition normalBoundsDelay;
 
     /// The latest normal content rectangle, retained through hiding and non-normal window states.
     private Rectangle2D normalBounds;
@@ -99,7 +109,7 @@ final class WindowBounds implements AutoCloseable {
 
     /// Samples geometry before JavaFX clears the hidden scene's native offsets.
     private final EventHandler<WindowEvent> hidingHandler = event -> {
-        updateBounds();
+        updateBoundsBeforeHide();
         shown = false;
         restoringPosition = false;
     };
@@ -123,9 +133,10 @@ final class WindowBounds implements AutoCloseable {
     /// @param initialBounds the normal content rectangle to restore
     /// @param minWidth the minimum content width
     /// @param minHeight the minimum content height
+    /// @param appKitDecoration whether native zoom can report animation frames before its maximized state
     /// @param saveBounds the callback receiving sampled normal content bounds
     WindowBounds(Stage stage, Region root, Rectangle2D initialBounds,
-                 double minWidth, double minHeight, Consumer<Rectangle2D> saveBounds) {
+                 double minWidth, double minHeight, boolean appKitDecoration, Consumer<Rectangle2D> saveBounds) {
         this.stage = stage;
         this.scene = Objects.requireNonNull(stage.getScene());
         this.root = root;
@@ -134,6 +145,16 @@ final class WindowBounds implements AutoCloseable {
         this.minWidth = minWidth;
         this.minHeight = minHeight;
         this.saveBounds = saveBounds;
+        if (appKitDecoration) {
+            normalBoundsDelay = new PauseTransition(APPKIT_BOUNDS_SETTLE_DELAY);
+            normalBoundsDelay.setOnFinished(event -> {
+                if (isNormal()) {
+                    saveNormalBounds();
+                }
+            });
+        } else {
+            normalBoundsDelay = null;
+        }
         // Enforce minimum content size on the stage, independently of the current page's layout minimum.
         root.setMinSize(0, 0);
         contentWidth.set(initialBounds.getWidth());
@@ -181,6 +202,9 @@ final class WindowBounds implements AutoCloseable {
 
     /// Requests one layout pulse to coalesce geometry notifications.
     private void invalidate() {
+        if (normalBoundsDelay != null) {
+            normalBoundsDelay.stop();
+        }
         dirty = true;
         Platform.requestNextPulse();
     }
@@ -197,7 +221,7 @@ final class WindowBounds implements AutoCloseable {
             return;
         }
         if (dirty) {
-            updateBounds();
+            updateBounds(false);
             if (minimumSizePending && isNormal()) {
                 Platform.requestNextPulse();
             }
@@ -229,8 +253,9 @@ final class WindowBounds implements AutoCloseable {
         }
     }
 
-    /// Updates content dimensions and saves normal bounds when native geometry is available.
-    private void updateBounds() {
+    /// Updates content dimensions and records or schedules the latest normal bounds.
+    /// @param immediately whether to save synchronously before the native geometry becomes inaccessible
+    private void updateBounds(boolean immediately) {
         dirty = false;
         if (!shown || restoringPosition || stage.isIconified()) {
             return;
@@ -244,15 +269,34 @@ final class WindowBounds implements AutoCloseable {
         }
         contentWidth.set(width);
         contentHeight.set(height);
-        if (WindowState.isMaximized(stage) || stage.isFullScreen()) {
+        if (!isNormal()) {
             return;
         }
 
+        if (normalBoundsDelay == null || immediately) {
+            saveNormalBounds();
+        } else {
+            // AppKit emits intermediate frames before JavaFX marks the stage maximized.
+            normalBoundsDelay.playFromStart();
+        }
+    }
+
+    /// Records the current content rectangle after normal geometry is available.
+    private void saveNormalBounds() {
+        Insets insets = root.getPadding();
         normalBounds = new Rectangle2D(
                 stage.getX() + scene.getX() + insets.getLeft(),
                 stage.getY() + scene.getY() + insets.getTop(),
-                Math.max(minWidth, width), Math.max(minHeight, height));
+                Math.max(minWidth, contentWidth.get()), Math.max(minHeight, contentHeight.get()));
         saveBounds.accept(normalBounds);
+    }
+
+    /// Stops deferred sampling and captures the last accessible geometry before hiding or detaching.
+    private void updateBoundsBeforeHide() {
+        if (normalBoundsDelay != null) {
+            normalBoundsDelay.stop();
+        }
+        updateBounds(true);
     }
 
     /// Measures the normal native frame and applies content minimums including frame and shadow padding.
@@ -274,7 +318,7 @@ final class WindowBounds implements AutoCloseable {
         if (closed) {
             return;
         }
-        updateBounds();
+        updateBoundsBeforeHide();
         closed = true;
         for (ObservableValue<?> observable : observed) {
             observable.removeListener(boundsListener);

@@ -17,15 +17,16 @@ public final class WindowState {
 
     /// Returns whether the launcher honors maximization for the stage's platform and style.
     ///
-    /// Transparent windows on macOS do not support maximization in the launcher: native zoom notifications
-    /// can mark an ordinary borderless window as maximized, including during initialization.
+    /// Borderless transparent windows on macOS can report a spurious maximized state.
+    /// Transparent windows configured with AppKit controls use ordinary native maximization.
     /// This policy does not suppress full-screen or iconified states.
     ///
     /// @param stage the main stage to inspect
-    /// @return `false` for transparent stages on macOS; `true` otherwise
+    /// @return whether the launcher's window can use native maximization
     public static boolean supportsMaximization(Stage stage) {
         // https://github.com/HMCL-dev/HMCL/issues/4290
-        return OperatingSystem.CURRENT_OS != OperatingSystem.MACOS || stage.getStyle() != StageStyle.TRANSPARENT;
+        return OperatingSystem.CURRENT_OS != OperatingSystem.MACOS || stage.getStyle() != StageStyle.TRANSPARENT
+                || stage.getProperties().containsKey(MacOSWindowDecoration.class);
     }
 
     /// Returns whether the stage is maximized under the launcher's platform policy.

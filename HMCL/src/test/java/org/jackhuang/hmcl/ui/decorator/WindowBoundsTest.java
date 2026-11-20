@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH AdditionRef-HMCL
 package org.jackhuang.hmcl.ui.decorator;
 
+import com.sun.javafx.stage.WindowHelper;
+import com.sun.javafx.tk.quantum.WindowStage;
+import com.sun.jna.Function;
+import com.sun.jna.Pointer;
 import javafx.application.ConditionalFeature;
 import javafx.application.Platform;
 import javafx.beans.InvalidationListener;
@@ -14,13 +18,17 @@ import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 import javafx.stage.StageStyle;
+import javafx.stage.WindowEvent;
 import org.jackhuang.hmcl.JavaFXLauncher;
 import org.jackhuang.hmcl.util.platform.OperatingSystem;
+import org.jackhuang.hmcl.util.platform.macos.ObjectiveCRuntime;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -245,6 +253,47 @@ final class WindowBoundsTest {
         }
     }
 
+    /// Verifies the native zoom button's intermediate frames do not overwrite the restore rectangle.
+    @Test
+    @EnabledOnOs(OS.MAC)
+    void preservesNormalBoundsDuringAppKitZoom() throws Exception {
+        Fixture fixture = onFxThread(() -> new Fixture(Objects.requireNonNull(MacOSWindowDecoration.create())));
+        try {
+            onFxThread(() -> {
+                fixture.replace(StageStyle.DECORATED, false);
+                return null;
+            });
+            awaitContent(fixture, INITIAL);
+            onFxThread(() -> {
+                clickNativeZoomButton(fixture.stage);
+                return null;
+            });
+            await(() -> fixture.stage.isMaximized() && fixture.content.getWidth() > INITIAL.getWidth());
+            onFxThread(() -> {
+                assertRectangle(INITIAL, fixture.saved);
+                clickNativeZoomButton(fixture.stage);
+                return null;
+            });
+            awaitContent(fixture, INITIAL);
+        } finally {
+            onFxThread(() -> {
+                fixture.close();
+                return null;
+            });
+        }
+    }
+
+    /// Invokes the AppKit zoom button so the native animation drives JavaFX window state.
+    private static void clickNativeZoomButton(Stage stage) {
+        WindowStage peer = (WindowStage) Objects.requireNonNull(WindowHelper.getPeer(stage));
+        long handle = Objects.requireNonNull(peer.getPlatformWindow()).getNativeWindow();
+        ObjectiveCRuntime objc = Objects.requireNonNull(ObjectiveCRuntime.INSTANCE);
+        Function send = Function.getFunction("objc", "objc_msgSend");
+        Pointer button = Objects.requireNonNull(send.invokePointer(
+                new Object[]{new Pointer(handle), objc.sel_registerName("standardWindowButton:"), 2L}));
+        send.invokeVoid(new @Nullable Object[]{button, objc.sel_registerName("performClick:"), Pointer.NULL});
+    }
+
     /// Verifies full-screen and iconified states do not replace the saved normal rectangle.
     @Test
     void preservesNormalBoundsThroughFullScreenAndMinimization() throws Exception {
@@ -375,8 +424,17 @@ final class WindowBoundsTest {
         /// The current tracker, absent before the first replacement or after closing.
         @Nullable WindowBounds bounds;
 
+        /// The AppKit integration used by the native zoom test, when requested.
+        final @Nullable MacOSWindowDecoration macDecoration;
+
         /// Creates a scene without showing a window.
         Fixture() {
+            this(null);
+        }
+
+        /// Creates a scene for testing normal bounds with optional AppKit decoration.
+        Fixture(@Nullable MacOSWindowDecoration macDecoration) {
+            this.macDecoration = macDecoration;
             // Measure client geometry independently of StackPane's outward pixel snapping during layout.
             root.setSnapToPixel(false);
         }
@@ -392,7 +450,10 @@ final class WindowBoundsTest {
                     root.setPadding(WindowState.isMaximized(stage) || stage.isFullScreen() ? Insets.EMPTY : normalInsets);
             stage.maximizedProperty().addListener(decorationListener);
             stage.fullScreenProperty().addListener(decorationListener);
-            bounds = new WindowBounds(stage, root, saved, 800, 490, value -> saved = value);
+            if (macDecoration != null) {
+                stage.addEventFilter(WindowEvent.WINDOW_SHOWN, event -> macDecoration.configure(stage));
+            }
+            bounds = new WindowBounds(stage, root, saved, 800, 490, macDecoration != null, value -> saved = value);
             stage.setMaximized(maximized && WindowState.supportsMaximization(stage));
             stage.show();
         }

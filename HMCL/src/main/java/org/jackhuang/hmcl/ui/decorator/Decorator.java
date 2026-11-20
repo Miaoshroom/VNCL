@@ -125,6 +125,9 @@ public final class Decorator {
     /// Reflective access to system decoration, or `null` on unsupported runtimes.
     private final @Nullable NativeWindowDecoration nativeDecoration = NativeWindowDecoration.create();
 
+    /// AppKit title-bar support on the bundled macOS JavaFX versions.
+    private final @Nullable MacOSWindowDecoration macDecoration = MacOSWindowDecoration.create();
+
     /// Whether the attached stage delegates window decoration and gestures to the platform.
     private boolean nativeDecorationEnabled;
 
@@ -212,6 +215,13 @@ public final class Decorator {
 
     /// Plays the opening animation immediately before the attached stage becomes visible.
     private final EventHandler<WindowEvent> windowShowingHandler = event -> playOpenAnimation();
+
+    /// Configures AppKit before the bounds tracker finalizes the shown window's position.
+    private final EventHandler<WindowEvent> windowShownHandler = event -> {
+        if (macDecoration != null && event.getSource() instanceof Stage shownStage) {
+            macDecoration.configure(shownStage);
+        }
+    };
 
     /// Releases animation caching and resets transforms when the attached stage is hidden.
     private final EventHandler<WindowEvent> windowHiddenHandler = event -> stopWindowAnimation();
@@ -303,7 +313,7 @@ public final class Decorator {
     ///
     /// @param edgeToEdge whether the attached stage is maximized under [WindowState]'s policy or full-screen
     private void updateWindowDecoration(boolean edgeToEdge) {
-        boolean customDecoration = !nativeDecorationEnabled && !edgeToEdge;
+        boolean customDecoration = !hasNativeFrame() && !edgeToEdge;
         root.setPadding(customDecoration ? SHADOW_INSETS : Insets.EMPTY);
         shadowContainer.setEffect(customDecoration ? windowShadow : null);
         mainWindowPane.setWindowCornersRounded(customDecoration);
@@ -546,7 +556,7 @@ public final class Decorator {
     /// @param event the pointer movement event
     private void onMouseMoved(MouseEvent event) {
         @Nullable Stage currentStage = stage;
-        if (nativeDecorationEnabled || currentStage == null
+        if (hasNativeFrame() || currentStage == null
                 || currentStage.isIconified()
                 || currentStage.isFullScreen()
                 || WindowState.isMaximized(currentStage)
@@ -733,8 +743,18 @@ public final class Decorator {
     ///
     /// @return the system style when available and permitted by the policy; otherwise the custom transparent style
     private StageStyle preferredStageStyle() {
-        return nativeDecoration != null && !Themes.windowTransparentProperty().get()
-                ? nativeDecoration.style : StageStyle.TRANSPARENT;
+        if (Themes.windowTransparentProperty().get()) {
+            return StageStyle.TRANSPARENT;
+        }
+        if (macDecoration != null) {
+            return StageStyle.DECORATED;
+        }
+        return nativeDecoration != null ? nativeDecoration.style : StageStyle.TRANSPARENT;
+    }
+
+    /// Reports whether the system draws the frame and handles resizing.
+    private boolean hasNativeFrame() {
+        return nativeDecorationEnabled || (stage != null && macDecoration != null);
     }
 
     /// Replaces the attached stage when transparency requires a different decoration style.
@@ -769,11 +789,22 @@ public final class Decorator {
         detachStage();
         previousStage.hide();
         attachStage(replacement);
-        replacement.setMaximized(maximized && WindowState.supportsMaximization(replacement));
+        boolean maximizeAfterShowing = showing && maximized && macDecoration != null;
+        if (!maximizeAfterShowing) {
+            replacement.setMaximized(maximized && WindowState.supportsMaximization(replacement));
+        }
         replacement.setFullScreen(fullScreen);
         replacement.setIconified(iconified);
         if (showing) {
             replacement.show();
+            if (maximizeAfterShowing) {
+                // Let the native peer finish applying the normal frame before AppKit captures it for zoom restore.
+                Platform.runLater(() -> {
+                    if (stage == replacement && replacement.isShowing() && WindowState.supportsMaximization(replacement)) {
+                        replacement.setMaximized(true);
+                    }
+                });
+            }
         }
         if (focusOwner != null) {
             focusOwner.requestFocus();
@@ -787,7 +818,7 @@ public final class Decorator {
     /// from that stage before being installed on `newStage`. A newly attached stage receives the persisted normal
     /// content bounds. Native frame offsets and minimum size are resolved when the stage is shown.
     /// The native-decoration policy selects the system or custom transparent decoration. Automatic mode uses
-    /// system decoration for supported opaque windows. Transparent windows always use custom decoration.
+    /// system decoration for supported opaque windows and AppKit controls for supported transparent macOS windows.
     /// Any active window animation is cancelled and reset. Custom window
     /// animations run only with custom decoration. Window-style listeners remain active until [#detachStage()].
     /// On macOS, native application appearance updates are installed once per stage and retained across detachment.
@@ -816,7 +847,7 @@ public final class Decorator {
                 nativeDecoration.configureStage(newStage);
             }
         }
-        mainWindowPane.setNativeDecoration(nativeDecorationEnabled ? nativeDecoration : null);
+        mainWindowPane.setNativeDecoration(nativeDecorationEnabled ? nativeDecoration : null, macDecoration != null);
 
         @Nullable Scene retainedScene = root.getScene();
         Scene scene;
@@ -843,7 +874,7 @@ public final class Decorator {
             }
         }
 
-        if (nativeDecorationEnabled) {
+        if (nativeDecorationEnabled || style == StageStyle.DECORATED) {
             scene.fillProperty().bind(Themes.colorSchemeProperty().getSurfaceContainer());
         } else {
             scene.fillProperty().unbind();
@@ -859,15 +890,16 @@ public final class Decorator {
                 Themes.applyNativeDarkMode(newStage);
             }
             playRestoreMinimizeAnimation = false;
-            updateWindowDecoration(false);
             stage = newStage;
+            updateWindowDecoration(false);
             newStage.addEventHandler(WindowEvent.WINDOW_SHOWING, windowShowingHandler);
+            newStage.addEventFilter(WindowEvent.WINDOW_SHOWN, windowShownHandler);
             newStage.addEventHandler(WindowEvent.WINDOW_HIDDEN, windowHiddenHandler);
             newStage.iconifiedProperty().addListener(iconifiedListener);
             newStage.maximizedProperty().addListener(stageDecorationListener);
             newStage.fullScreenProperty().addListener(stageDecorationListener);
             windowBounds = new WindowBounds(newStage, root, initialContentBounds(),
-                    MIN_CONTENT_WIDTH, MIN_CONTENT_HEIGHT, this::saveContentBounds);
+                    MIN_CONTENT_WIDTH, MIN_CONTENT_HEIGHT, macDecoration != null, this::saveContentBounds);
             contentWidth.bind(windowBounds.contentWidthProperty());
             contentHeight.bind(windowBounds.contentHeightProperty());
             updateWindowDecoration(WindowState.isMaximized(newStage) || newStage.isFullScreen());
@@ -898,6 +930,7 @@ public final class Decorator {
         if (stage != null) {
             Themes.windowTransparentProperty().removeListener(windowStyleListener);
             stage.removeEventHandler(WindowEvent.WINDOW_SHOWING, windowShowingHandler);
+            stage.removeEventFilter(WindowEvent.WINDOW_SHOWN, windowShownHandler);
             stage.removeEventHandler(WindowEvent.WINDOW_HIDDEN, windowHiddenHandler);
             stage.iconifiedProperty().removeListener(iconifiedListener);
             stage.maximizedProperty().removeListener(stageDecorationListener);
@@ -967,7 +1000,7 @@ public final class Decorator {
     /// Calling this method replaces any active minimize, restore, close, or earlier opening animation. If window
     /// animations are disabled, it restores the stable root transform without starting an animation.
     private void playOpenAnimation() {
-        if (nativeDecorationEnabled || !AnimationUtils.playWindowAnimation()) {
+        if (hasNativeFrame() || !AnimationUtils.playWindowAnimation()) {
             stopWindowAnimation();
             Controllers.trimHeap();
             return;

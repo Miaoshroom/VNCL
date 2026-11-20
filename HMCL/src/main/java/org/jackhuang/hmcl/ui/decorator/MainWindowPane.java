@@ -55,6 +55,9 @@ final class MainWindowPane extends StackPane {
     /// The diameter, in pixels, of the rounded window corners.
     private static final double ARC = 8.0;
 
+    /// Leading space for AppKit's compact toolbar buttons and a gap before the title.
+    private static final Insets MAC_BUTTON_INSETS = new Insets(0, 0, 0, 78);
+
     /// The decorator whose state and actions are represented by this pane.
     private final Decorator decorator;
 
@@ -67,8 +70,11 @@ final class MainWindowPane extends StackPane {
     /// The title bar containing page navigation state.
     private final BorderPane titleBar;
 
-    /// The custom help, minimize, and close buttons shared by both decoration styles.
-    private final HBox windowButtons;
+    /// The custom minimize button used with self-drawn controls.
+    private final JFXButton minimizeButton = new JFXButton();
+
+    /// The custom close button used with self-drawn controls.
+    private final JFXButton closeButton = new JFXButton();
 
     /// The transition container used when the title-bar state changes.
     private final TransitionPane navBarPane;
@@ -109,11 +115,10 @@ final class MainWindowPane extends StackPane {
         FXUtils.setOverflowHidden(center);
         frame.setCenter(center);
 
-        windowButtons = createWindowButtons();
         titleBar = new BorderPane();
         titleBar.setPickOnBounds(false);
         titleBar.getStyleClass().add("jfx-tool-bar");
-        titleBar.setRight(windowButtons);
+        titleBar.setRight(createWindowButtons());
 
         navBarPane = new TransitionPane();
         titleBar.setCenter(navBarPane);
@@ -136,8 +141,14 @@ final class MainWindowPane extends StackPane {
 
     /// Moves the custom title bar into or out of the native dragging header.
     ///
-    /// @param decoration the native header support, or `null` for custom decoration
-    void setNativeDecoration(@Nullable NativeWindowDecoration decoration) {
+    /// @param decoration the JavaFX extended header, or `null` to lay out the title bar directly
+    /// @param macSystemButtons whether AppKit provides the window buttons
+    void setNativeDecoration(@Nullable NativeWindowDecoration decoration, boolean macSystemButtons) {
+        titleBar.setPadding(macSystemButtons ? MAC_BUTTON_INSETS : Insets.EMPTY);
+        minimizeButton.setVisible(!macSystemButtons);
+        minimizeButton.setManaged(!macSystemButtons);
+        closeButton.setVisible(!macSystemButtons);
+        closeButton.setManaged(!macSystemButtons);
         frame.setTop(null);
         if (decoration == null) {
             frame.setTop(titleBar);
@@ -251,7 +262,6 @@ final class MainWindowPane extends StackPane {
         helpButton.setOnAction(event -> FXUtils.openLink(Metadata.CONTACT_URL));
         decorator.forbidDraggingWindow(helpButton);
 
-        JFXButton minimizeButton = new JFXButton();
         minimizeButton.setFocusTraversable(false);
         minimizeButton.setGraphic(SVG.MINIMIZE_CENTER.createIcon(Themes.titleFillProperty(), SVG.SIZE_TITLE));
         minimizeButton.setAccessibleText(i18n("button.minimize"));
@@ -259,7 +269,6 @@ final class MainWindowPane extends StackPane {
         minimizeButton.setOnAction(event -> decorator.minimizeWindow());
         decorator.forbidDraggingWindow(minimizeButton);
 
-        JFXButton closeButton = new JFXButton();
         closeButton.setFocusTraversable(false);
         closeButton.setAccessibleText(i18n("button.close"));
         closeButton.setGraphic(SVG.CLOSE.createIcon(SVG.SIZE_TITLE));
