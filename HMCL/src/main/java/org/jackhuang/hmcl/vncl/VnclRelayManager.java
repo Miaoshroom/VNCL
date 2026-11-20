@@ -8,6 +8,9 @@ import javafx.application.Platform;
 import javafx.beans.property.ReadOnlyIntegerProperty;
 import javafx.beans.property.ReadOnlyIntegerWrapper;
 import org.jackhuang.hmcl.Metadata;
+import org.jackhuang.hmcl.util.platform.Architecture;
+import org.jackhuang.hmcl.util.platform.OperatingSystem;
+import org.jackhuang.hmcl.util.tree.TarFileTree;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
 
@@ -22,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
@@ -44,14 +48,18 @@ public final class VnclRelayManager {
     /// Room service base URL.
     private static final String API_BASE = "https://relay.nekoinn.top/vncl/api/rooms";
 
-    /// Download URL for the optional frpc component.
-    private static final String FRPC_DOWNLOAD_URL = "https://relay.nekoinn.top/vncl/download/frpc.exe";
+    /// Existing standalone Windows client served by the VNCL relay.
+    private static final FrpcArtifact WINDOWS_FRPC = new FrpcArtifact(
+            "frpc.exe", URI.create("https://relay.nekoinn.top/vncl/download/frpc.exe"), 16_442_368L,
+            "332B1CFDFEC48C6745F94904026DEDC0BF3872D887E161B9E555C610554AAB49");
 
-    /// Expected size of the downloaded frpc build.
-    private static final long FRPC_SIZE = 16_442_368L;
+    /// Upstream Apple Silicon client matching the relay's documented frps version.
+    private static final FrpcArtifact MACOS_ARM64_FRPC = new FrpcArtifact(
+            "frpc", URI.create("https://github.com/fatedier/frp/releases/download/v0.61.1/frp_0.61.1_darwin_arm64.tar.gz"),
+            14_259_442L, "52D258200FDABFDF69CC2217CEC651B597D79C3DEFDB4724CAA6544764CE7F31");
 
-    /// SHA-256 of the downloaded frpc build, used to reject corrupted or tampered downloads.
-    private static final String FRPC_SHA256 = "332B1CFDFEC48C6745F94904026DEDC0BF3872D887E161B9E555C610554AAB49";
+    /// Upstream SHA-256 of the archive containing the Apple Silicon client.
+    private static final String MACOS_ARM64_ARCHIVE_SHA256 = "3E65F13A17A284BD6013E6BB6856BC2720074CEA6094CC446C1F4C3932154C2D";
 
     /// Last frpc file whose checksum was verified, to avoid rehashing 16 MB for every start.
     private static @Nullable Path verifiedFrpcPath;
@@ -61,6 +69,12 @@ public final class VnclRelayManager {
     /// HTTP client for the room service.
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
+            .build();
+
+    /// Follows GitHub's HTTPS redirects for the Apple Silicon release asset.
+    private static final HttpClient GITHUB_DOWNLOAD_HTTP = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(15))
+            .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
 
     /// Room created by this launcher, used for heartbeat and deletion.
@@ -318,26 +332,35 @@ public final class VnclRelayManager {
         return directory;
     }
 
+    /// Returns a verified local executable, downloading the client for this platform when needed.
     private static Path frpcPath() throws IOException {
+        boolean macArm64 = OperatingSystem.CURRENT_OS == OperatingSystem.MACOS
+                && Architecture.SYSTEM_ARCH == Architecture.ARM64;
+        if (!macArm64 && OperatingSystem.CURRENT_OS != OperatingSystem.WINDOWS) {
+            throw new IOException("VNCL relay requires Windows or Apple Silicon macOS");
+        }
+        FrpcArtifact artifact = macArm64 ? MACOS_ARM64_FRPC : WINDOWS_FRPC;
         Path directory = relayDirectory();
-        Path target = directory.resolve("frpc.exe");
-        if (isValidFrpc(target)) {
+        Path target = directory.resolve(artifact.fileName());
+        if (isValidFrpc(target, artifact)) {
+            if (macArm64 && !Files.isExecutable(target)) {
+                Files.setPosixFilePermissions(target, PosixFilePermissions.fromString("rwx------"));
+            }
             return target;
         }
 
-        Path temporary = Files.createTempFile(directory, "frpc-", ".exe");
+        Path temporary = Files.createTempFile(directory, "frpc-", ".tmp");
         try {
-            HttpResponse<Path> response = HTTP.send(
-                    HttpRequest.newBuilder(URI.create(FRPC_DOWNLOAD_URL))
-                            .timeout(Duration.ofMinutes(5))
-                            .GET()
-                            .build(),
-                    BodyHandlers.ofFile(temporary));
-            if (response.statusCode() / 100 != 2) {
-                throw new IOException("frpc download returned " + response.statusCode());
+            if (macArm64) {
+                downloadMacFrpc(artifact.url(), temporary);
+            } else {
+                downloadFrpc(HTTP, artifact.url(), temporary);
             }
-            if (Files.size(temporary) != FRPC_SIZE || !FRPC_SHA256.equalsIgnoreCase(sha256(temporary))) {
+            if (Files.size(temporary) != artifact.size() || !artifact.sha256().equals(sha256(temporary))) {
                 throw new IOException("frpc download failed integrity check");
+            }
+            if (macArm64) {
+                Files.setPosixFilePermissions(temporary, PosixFilePermissions.fromString("rwx------"));
             }
             try {
                 Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
@@ -354,8 +377,36 @@ public final class VnclRelayManager {
         }
     }
 
+    /// Downloads a client release asset to a staging file.
+    private static void downloadFrpc(HttpClient client, URI url, Path destination) throws IOException, InterruptedException {
+        HttpResponse<Path> response = client.send(
+                HttpRequest.newBuilder(url).timeout(Duration.ofMinutes(5)).GET().build(),
+                BodyHandlers.ofFile(destination));
+        if (response.statusCode() / 100 != 2) {
+            throw new IOException("frpc download returned " + response.statusCode());
+        }
+    }
+
+    /// Verifies the Apple Silicon archive before extracting only its frpc executable.
+    private static void downloadMacFrpc(URI url, Path destination) throws IOException, InterruptedException {
+        Path archive = Files.createTempFile(relayDirectory(), "frpc-", ".tar.gz");
+        try {
+            downloadFrpc(GITHUB_DOWNLOAD_HTTP, url, archive);
+            if (!MACOS_ARM64_ARCHIVE_SHA256.equals(sha256(archive))) {
+                throw new IOException("frpc archive failed integrity check");
+            }
+            try (TarFileTree tree = TarFileTree.open(archive);
+                 InputStream executable = tree.getInputStream("frp_0.61.1_darwin_arm64/frpc")) {
+                // The archive entry supplies the bytes, and the staging file supplies the only output path.
+                Files.copy(executable, destination, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(archive);
+        }
+    }
+
     /// Returns whether the cached frpc has the expected size and checksum.
-    private static synchronized boolean isValidFrpc(Path file) {
+    private static synchronized boolean isValidFrpc(Path file, FrpcArtifact artifact) {
         try {
             if (!Files.isRegularFile(file)) {
                 return false;
@@ -365,7 +416,7 @@ public final class VnclRelayManager {
             if (file.equals(verifiedFrpcPath) && size == verifiedFrpcSize && modified == verifiedFrpcModified) {
                 return true;
             }
-            if (size != FRPC_SIZE || !FRPC_SHA256.equalsIgnoreCase(sha256(file))) {
+            if (size != artifact.size() || !artifact.sha256().equals(sha256(file))) {
                 return false;
             }
             verifiedFrpcPath = file;
@@ -375,6 +426,10 @@ public final class VnclRelayManager {
         } catch (IOException exception) {
             return false;
         }
+    }
+
+    /// Identifies the download and the expected contents of its executable.
+    private record FrpcArtifact(String fileName, URI url, long size, String sha256) {
     }
 
     /// Records a freshly downloaded frpc as verified.

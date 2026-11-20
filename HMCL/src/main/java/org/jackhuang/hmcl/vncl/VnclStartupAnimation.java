@@ -58,11 +58,14 @@ public final class VnclStartupAnimation {
     /// The overlay currently on screen, if any; prevents stacking multiple animations.
     private static @Nullable Overlay current;
 
-    /// Returns the directory scanned for startup videos (next to the launcher executable).
+    /// Returns the configured video directory or the default next to the launcher executable.
     ///
-    /// The launcher can be started as a jar or as the packaged exe, so the directory is derived from
-    /// the code source instead of the process working directory.
+    /// The macOS app sets the override to a writable directory outside the app bundle.
     public static Path videosDirectory() {
+        @Nullable String configuredDirectory = System.getProperty("vncl.videos.dir");
+        if (configuredDirectory != null && !configuredDirectory.isBlank()) {
+            return Path.of(configuredDirectory);
+        }
         return launcherDirectory().resolve("videos");
     }
 

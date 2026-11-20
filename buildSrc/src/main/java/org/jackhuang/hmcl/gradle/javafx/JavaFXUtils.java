@@ -9,6 +9,7 @@ import com.sun.jna.Platform;
 import org.gradle.api.GradleException;
 import org.gradle.api.Project;
 import org.gradle.api.Task;
+import org.jetbrains.annotations.Unmodifiable;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -18,12 +19,25 @@ import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 
 /**
  * @author Glavo
  */
 public final class JavaFXUtils {
-    public static final String[] MODULES = {"base", "graphics", "controls"};
+    /// JavaFX modules required by the launcher's UI on every platform.
+    private static final @Unmodifiable List<String> MODULES = List.of("base", "graphics", "controls");
+
+    /// JavaFX modules for platforms that also download the startup video player.
+    private static final @Unmodifiable List<String> MODULES_WITH_MEDIA = List.of("base", "graphics", "controls", "media");
+
+    /// Selects the modules downloaded by the launcher for the given platform.
+    private static @Unmodifiable List<String> runtimeModules(String platform) {
+        return switch (platform) {
+            case "windows-x86_64", "macos-arm64" -> MODULES_WITH_MEDIA;
+            default -> MODULES;
+        };
+    }
 
     private static void addDependencies(Project rootProject) {
         try {
@@ -78,6 +92,7 @@ public final class JavaFXUtils {
         }
     }
 
+    /// Writes the runtime dependency manifest with checksums from Maven Central.
     private static void generateOpenJFXDependencies(Task task) {
         JsonObject dependenciesJson = new JsonObject();
         JavaFXPlatform.ALL.forEach((name, platform) -> {
@@ -85,7 +100,7 @@ public final class JavaFXUtils {
             platform.getVersions().forEach((versionType, version) -> {
                 JsonArray modulesJson = new JsonArray();
 
-                for (String module : MODULES) {
+                for (String module : runtimeModules(name)) {
                     JsonObject moduleJson = new JsonObject();
                     moduleJson.addProperty("module", "javafx." + module);
                     moduleJson.addProperty("groupId", platform.getGroupId());
@@ -122,12 +137,13 @@ public final class JavaFXUtils {
         }
     }
 
+    /// Requests each runtime dependency from the Tencent Cloud mirror to warm its cache.
     private static void preTouchOpenJFXDependencies(Task task) {
         String mirrorRepo = "https://mirrors.cloud.tencent.com/nexus/repository/maven-public";
 
         JavaFXPlatform.ALL.forEach((name, platform) -> {
             platform.getVersions().forEach((versionType, version) -> {
-                for (String module : MODULES) {
+                for (String module : runtimeModules(name)) {
                     String jarUrl = String.format("%s/%s/javafx-%s/%s/javafx-%s-%s-%s.jar",
                             mirrorRepo,
                             platform.getGroupId().replace('.', '/'),

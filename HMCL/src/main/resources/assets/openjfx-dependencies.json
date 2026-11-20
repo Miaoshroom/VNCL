@@ -204,6 +204,14 @@
         "version": "21.0.8",
         "classifier": "mac-aarch64",
         "sha1": "8a2622c5e6df1334cb3a62d6829c60326261e47d"
+      },
+      {
+        "module": "javafx.media",
+        "groupId": "org.openjfx",
+        "artifactId": "javafx-media",
+        "version": "21.0.8",
+        "classifier": "mac-aarch64",
+        "sha1": "814e88c0622e1912cdc43f3e315e53d2f91d20ac"
       }
     ],
     "modern": [
@@ -230,6 +238,14 @@
         "version": "25",
         "classifier": "mac-aarch64",
         "sha1": "a5528f381b061cb83dda75e019da3c8c4d4dc5a1"
+      },
+      {
+        "module": "javafx.media",
+        "groupId": "org.openjfx",
+        "artifactId": "javafx-media",
+        "version": "25",
+        "classifier": "mac-aarch64",
+        "sha1": "c051cb1db3a98a8e4ff849f68c1554840549d820"
       }
     ]
   },
