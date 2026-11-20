@@ -28,7 +28,7 @@ contents="$app/Contents"
 mkdir -p "$contents/MacOS" "$contents/Resources" "$stage/VNCL.iconset"
 cp "$jar" "$contents/Resources/VNCL.jar"
 
-# Use the same artwork as the launcher's macOS Dock icon.
+# Keep the bundle artwork for Finder and the Dock when the app is closed.
 source_icon="$stage/icon-mac.png"
 /usr/bin/unzip -p "$contents/Resources/VNCL.jar" assets/img/icon-mac.png > "$source_icon"
 for size in 16 32 128 256 512; do
@@ -38,6 +38,12 @@ for size in 16 32 128 256 512; do
         --out "$stage/VNCL.iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 /usr/bin/iconutil -c icns "$stage/VNCL.iconset" -o "$contents/Resources/VNCL.icns"
+
+# JavaFX sets the running Dock icon directly. Add the inset seen on the closed
+# app icon (54 px out of 66 px) to the runtime artwork's 512 px canvas.
+/usr/bin/sips -z 416 416 "$source_icon" --out "$stage/dock-icon.png" >/dev/null
+/usr/bin/sips -p 512 512 "$stage/dock-icon.png" \
+    --out "$contents/Resources/VNCL-dock.png" >/dev/null
 
 cat > "$contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -90,7 +96,7 @@ if ! mkdir -p "$data_dir" || ! cd -- "$data_dir"; then
     show_error "无法打开 VNCL 数据目录：$data_dir"
 fi
 
-exec /usr/bin/arch -arm64 "$java_home/bin/java" -Xdock:name=VNCL -Xdock:icon="$resources/VNCL.icns" \
+exec /usr/bin/arch -arm64 "$java_home/bin/java" -Xdock:name=VNCL -Xdock:icon="$resources/VNCL-dock.png" \
     "-Dvncl.videos.dir=$PWD/videos" -jar "$resources/VNCL.jar" "$@"
 LAUNCHER
 
